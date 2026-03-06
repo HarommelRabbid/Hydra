@@ -1,4 +1,3 @@
-# evaluator.py
 import sys
 import math
 from errors import HydraError
@@ -52,7 +51,7 @@ class Evaluator:
         self.env.set('infinity', float('inf'), 'float', ['global', 'const'])
         
         def native_write(*args):
-            sys.stdout.write(" ".join("null" if a is None else str(a) for a in args) + "\n")
+            sys.stdout.write(" ".join(self.to_hydra_str(a) for a in args) + "\n")
             return None
             
         def native_read():
@@ -72,6 +71,12 @@ class Evaluator:
         self.register_native_func("read", native_read)
         self.register_native_func("typeof", native_typeof)
         
+    def to_hydra_str(self, val):
+        """Standardizes host string conversion to Hydra syntax."""
+        if val is None: return "null"
+        if isinstance(val, bool): return "true" if val else "false"
+        return str(val)
+
     def register_native_func(self, name, func): self.env.set(name, func, 'function', ['global', 'const'])
 
     def evaluate(self, node):
@@ -87,7 +92,6 @@ class Evaluator:
             if t == 'Program':
                 try:
                     for stmt in node['body']: self.evaluate(stmt)
-                # Bug 7 Fix: Global control flow nuke prevented
                 except ReturnException: raise HydraError("Cannot 'return' outside a function.")
                 except BreakException: raise HydraError("Cannot 'break' outside a loop.")
                 except ContinueException: raise HydraError("Cannot 'continue' outside a loop.")
@@ -95,7 +99,6 @@ class Evaluator:
             elif t == 'VarDecl':
                 val = None
                 
-                # Bug 9 Fix: Static Typing Assassin
                 if node['name'] in self.env.vars:
                     raise NameError(f"Variable '{node['name']}' is already defined in this scope.")
                     
@@ -120,7 +123,7 @@ class Evaluator:
                 
                 if node.get('value') is not None: 
                     val = self.evaluate(node['value'])
-                    if isinstance(val, list): val = val.copy() # Bug 15 Fix: Silent Reference Bleed
+                    if isinstance(val, list): val = val.copy() 
                 
                 actual_type = node['var_type']
                 if actual_type == 'auto':
@@ -167,7 +170,7 @@ class Evaluator:
                     elif isinstance(obj, dict): obj[target['prop']] += delta
                 elif target['type'] == 'ArrayAccess':
                     arr = self.evaluate(target['target']); idx = self.evaluate(target['index'])
-                    if isinstance(arr, str): raise TypeError("Strings are immutable in Hydra.") # Bug 5 Fix
+                    if isinstance(arr, str): raise TypeError("Strings are immutable in Hydra.")
                     if isinstance(arr, list) and idx >= len(arr): arr.extend([None] * (idx - len(arr) + 1))
                     arr[idx] += delta
                 
@@ -176,7 +179,10 @@ class Evaluator:
                 
                 def apply_op(current, v, o):
                     if o == '=': return v
-                    if o == '+=': return str(current)+str(v) if isinstance(current,str) or isinstance(v,str) else current+v
+                    if o == '+=': 
+                        if isinstance(current, str) or isinstance(v, str):
+                            return self.to_hydra_str(current) + self.to_hydra_str(v)
+                        return current + v
                     if o == '-=': return current - v
                     if o == '*=': return current * v
                     if o == '/=': return current / v
@@ -199,7 +205,9 @@ class Evaluator:
                     else: arr[idx] = apply_op(arr[idx], val, op)
                     
             elif t == 'ExprStmt': self.evaluate(node['expr'])
-            elif t == 'FuncDecl': self.env.set(node['name'], {'type': 'Function', 'params': node['params'], 'body': node['body'], 'closure': self.env}, 'function', node.get('modifiers', []))
+            
+            # Bug Fix: Properly save the intended return_type into the closure dictionary!
+            elif t == 'FuncDecl': self.env.set(node['name'], {'type': 'Function', 'return_type': node.get('return_type', 'any'), 'params': node['params'], 'body': node['body'], 'closure': self.env}, 'function', node.get('modifiers', []))
             
             elif t == 'MethodDef':
                 class_def = self.env.get(node['class_name'])
@@ -214,7 +222,6 @@ class Evaluator:
                 
                 if callable(func): return func(*args)
                 
-                # Bug 4 Fix: Function Arity check!
                 if len(args) > len(func['params']):
                     raise TypeError(f"Too many arguments passed! Expected {len(func['params'])}, got {len(args)}.")
                     
@@ -230,7 +237,18 @@ class Evaluator:
                 try:
                     for stmt in func['body']: self.evaluate(stmt)
                 except ReturnException as r: result = r.value
-                finally: self.env = old_env # Bug 8 Fix: Stop memory leaks!
+                finally: self.env = old_env
+                
+                # Bug Fix: Strict return type enforcement barrier
+                ret_type = func.get('return_type', 'any')
+                if ret_type != 'any' and ret_type != 'auto':
+                    if ret_type == 'void' and result is not None:
+                        v_type = type(result).__name__.replace('str', 'string')
+                        raise TypeError(f"Type Mismatch: 'void' function cannot return a value of type '{v_type}'.")
+                    elif ret_type != 'void' and not old_env.check_type(result, ret_type):
+                        v_type = "null" if result is None else type(result).__name__.replace('str', 'string')
+                        raise TypeError(f"Type Mismatch: Function expected to return '{ret_type}', but returned '{v_type}'.")
+                        
                 return result
                 
             elif t == 'DotAccess':
@@ -241,7 +259,6 @@ class Evaluator:
             elif t == 'ArrayAccess':
                 arr = self.evaluate(node['target'])
                 idx = self.evaluate(node['index'])
-                # Bug 12 Fix: Safely handle out-of-bounds reads!
                 if isinstance(arr, (list, str)):
                     return arr[idx] if 0 <= idx < len(arr) else None
                 raise TypeError("Cannot index non-array or non-string.")
@@ -254,7 +271,7 @@ class Evaluator:
                 self.env = try_env
                 try:
                     for stmt in node['try_body']: self.evaluate(stmt)
-                except Exception as e: # Bug 2 Fix: Catch native Python ZeroDivisionError etc!
+                except Exception as e:
                     error_msg = str(e) if not isinstance(e, HydraError) else e.msg
                     self.env = old_env 
                     catch_env = Environment(parent=self.env)
@@ -350,8 +367,7 @@ class Evaluator:
             elif t == 'FString':
                 res = ""
                 for p in node['parts']:
-                    val = self.evaluate(p)
-                    res += "null" if val is None else str(val)
+                    res += self.to_hydra_str(self.evaluate(p))
                 return res
 
             elif t == 'BinOp':
@@ -365,9 +381,9 @@ class Evaluator:
                 
                 try:
                     if op == '+': 
-                        l_str = "null" if l is None else str(l)
-                        r_str = "null" if r is None else str(r)
-                        return l_str + r_str if isinstance(l,str) or isinstance(r,str) else l+r
+                        if isinstance(l, str) or isinstance(r, str):
+                            return self.to_hydra_str(l) + self.to_hydra_str(r)
+                        return l + r
                         
                     if op == '-': return l - r
                     if op in ['*', '×']: return l * r
@@ -379,7 +395,7 @@ class Evaluator:
                     if op == '<': return l < r
                     if op == '>': return l > r
                 except ZeroDivisionError:
-                    raise HydraError("Division by zero") # Converts Python crash to safe Hydra crash!
+                    raise HydraError("Division by zero") 
                     
             elif t == 'Literal': return node['value']
             elif t == 'Identifier': return self.env.get(node['name'])

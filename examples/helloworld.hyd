@@ -1,0 +1,6 @@
+write("Hello World!");
+int function::test(int t = 1)[[
+    write(t);
+    return "Hello World";
+]]
+write(test());
