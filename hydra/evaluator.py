@@ -1,3 +1,4 @@
+# evaluator.py
 import sys
 import math
 from errors import HydraError
@@ -30,7 +31,6 @@ class Environment:
         if expected_type == 'bool': return isinstance(val, bool)
         if expected_type == 'array': return isinstance(val, list)
         
-        # Deep recursion validation for internal arrays!
         if expected_type.endswith('_array'):
             if not isinstance(val, list): return False
             inner_type = expected_type.replace('_array', '')
@@ -123,51 +123,57 @@ class Evaluator:
                     raise SyntaxError("Cannot 'continue' outside a loop.")
                     
             elif t == 'VarDecl':
-                val = None
-                if node['name'] in self.env.vars:
-                    raise NameError(f"Variable '{node['name']}' is already defined in this scope.")
+                actual_type_base = node['var_type']
+                
+                # Loop through all comma-separated variable declarations!
+                for decl in node['declarations']:
+                    decl_name = decl['name']
+                    decl_val = None
                     
-                try:
-                    type_obj = self.env.get(node['var_type']) if 'var_type' in node else None
-                    if isinstance(type_obj, dict) and type_obj.get('type') == 'Class':
-                        args = [self.evaluate(a) for a in node.get('args', [])]
-                        val = Environment(parent=self.env); old_env = self.env; self.env = val 
-                        for stmt in type_obj['body']: self.evaluate(stmt)
-                        constructor = val.vars.get(node['var_type']) or val.vars.get('init')
-                        if constructor and isinstance(constructor, dict) and constructor.get('type') == 'Function':
-                            call_env = Environment(parent=constructor['closure'])
-                            for i, param in enumerate(constructor['params']):
-                                if i < len(args): call_env.set(param['name'], args[i])
-                            self.env = call_env
-                            try:
-                                for stmt in constructor['body']: self.evaluate(stmt)
-                            except ReturnException: pass
-                        self.env = old_env
-                except NameError: pass
-                
-                if node.get('value') is not None: 
-                    val = self.evaluate(node['value'])
-                    if isinstance(val, list): val = val.copy() 
-                
-                actual_type = node['var_type']
-                if actual_type == 'auto':
-                    if val is not None:
-                        if isinstance(val, bool): actual_type = 'bool'
-                        elif isinstance(val, int): actual_type = 'int'
-                        elif isinstance(val, float): actual_type = 'float'
-                        elif isinstance(val, str): actual_type = 'str'
-                        elif isinstance(val, list): actual_type = 'array'
+                    if decl_name in self.env.vars:
+                        raise NameError(f"Variable '{decl_name}' is already defined in this scope.")
+                        
+                    try:
+                        type_obj = self.env.get(actual_type_base) if actual_type_base != 'auto' else None
+                        if isinstance(type_obj, dict) and type_obj.get('type') == 'Class':
+                            args = [self.evaluate(a) for a in decl.get('args', [])]
+                            decl_val = Environment(parent=self.env); old_env = self.env; self.env = decl_val 
+                            for stmt in type_obj['body']: self.evaluate(stmt)
+                            constructor = decl_val.vars.get(actual_type_base) or decl_val.vars.get('init')
+                            if constructor and isinstance(constructor, dict) and constructor.get('type') == 'Function':
+                                call_env = Environment(parent=constructor['closure'])
+                                for i, param in enumerate(constructor['params']):
+                                    if i < len(args): call_env.set(param['name'], args[i])
+                                self.env = call_env
+                                try:
+                                    for stmt in constructor['body']: self.evaluate(stmt)
+                                except ReturnException: pass
+                            self.env = old_env
+                    except NameError: pass
+                    
+                    if decl.get('value') is not None: 
+                        decl_val = self.evaluate(decl['value'])
+                        if isinstance(decl_val, list): decl_val = decl_val.copy() 
+                    
+                    actual_type = actual_type_base
+                    if actual_type == 'auto':
+                        if decl_val is not None:
+                            if isinstance(decl_val, bool): actual_type = 'bool'
+                            elif isinstance(decl_val, int): actual_type = 'int'
+                            elif isinstance(decl_val, float): actual_type = 'float'
+                            elif isinstance(decl_val, str): actual_type = 'str'
+                            elif isinstance(decl_val, list): actual_type = 'array'
+                            else: actual_type = 'any'
                         else: actual_type = 'any'
-                    else: actual_type = 'any'
-                
-                target_env = self.env
-                if 'global' in node.get('modifiers', []):
-                    while target_env.parent: target_env = target_env.parent
-                
-                if not target_env.check_type(val, actual_type):
-                    val_type = "null" if val is None else type(val).__name__.replace('str', 'string')
-                    raise TypeError(f"Type Mismatch: Cannot assign '{val_type}' to '{actual_type}' variable '{node['name']}'")
-                target_env.set(node['name'], val, actual_type, node.get('modifiers', []))
+                    
+                    target_env = self.env
+                    if 'global' in node.get('modifiers', []):
+                        while target_env.parent: target_env = target_env.parent
+                    
+                    if not target_env.check_type(decl_val, actual_type):
+                        val_type = "null" if decl_val is None else type(decl_val).__name__.replace('str', 'string')
+                        raise TypeError(f"Type Mismatch: Cannot assign '{val_type}' to '{actual_type}' variable '{decl_name}'")
+                    target_env.set(decl_name, decl_val, actual_type, node.get('modifiers', []))
             
             elif t == 'ArrayDecl':
                 if 'elements' in node: val = [self.evaluate(e) for e in node['elements']]
@@ -180,8 +186,6 @@ class Evaluator:
                     while target_env.parent: target_env = target_env.parent
                     
                 actual_type = node.get('var_type', 'any')
-                
-                # Enforce inner element types upon initialization!
                 if actual_type not in ['auto', 'any']:
                     if val is not None:
                         for i, item in enumerate(val):
@@ -239,8 +243,6 @@ class Evaluator:
                     if isinstance(arr, list) and idx >= len(arr): arr.extend([None] * (idx - len(arr) + 1))
                     
                     val_to_assign = val if op == '=' else apply_op(arr[idx], val, op)
-                    
-                    # Ensure array mutations do not break strict types!
                     if target['target']['type'] == 'Identifier':
                         meta = self.env.get_meta(target['target']['name'])
                         if meta and meta['type'].endswith('_array'):
@@ -249,7 +251,6 @@ class Evaluator:
                                 if not self.env.check_type(val_to_assign, inner_type):
                                     v_type = "null" if val_to_assign is None else type(val_to_assign).__name__.replace('str', 'string')
                                     raise TypeError(f"Type Mismatch: Cannot assign '{v_type}' into '{inner_type} array'.")
-                                    
                     arr[idx] = val_to_assign
                     
             elif t == 'ExprStmt': self.evaluate(node['expr'])

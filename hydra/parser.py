@@ -1,4 +1,3 @@
-# parser_engine.py
 from errors import HydraError
 from lexer import lex
 
@@ -61,22 +60,36 @@ class Parser:
         elif token.type == 'ID':
             next_tok = self.tokens[self.pos + 1] if self.pos + 1 < len(self.tokens) else None
             
+            # Support multiple custom class instantiations: Player p1, p2("Hero");
             if next_tok and next_tok.type == 'ID':
-                var_type = self.consume('ID').value; var_name = self.consume('ID').value
-                args = []
-                if self.current().type == 'LPAREN':
-                    self.consume('LPAREN')
-                    if self.current().type != 'RPAREN':
-                        args.append(self.parse_expr())
-                        while self.current().type == 'COMMA': 
-                            self.consume('COMMA')
-                            if self.current().type == 'RPAREN': break
+                var_type = self.consume('ID').value
+                declarations = []
+                while True:
+                    var_name = self.consume('ID').value; args = []
+                    if self.current().type == 'LPAREN':
+                        self.consume('LPAREN')
+                        if self.current().type != 'RPAREN':
                             args.append(self.parse_expr())
-                    self.consume('RPAREN')
-                if self.current().type == 'SEMI':
-                    self.consume('SEMI'); return {'type': 'VarDecl', 'var_type': var_type, 'name': var_name, 'value': None, 'args': args, 'modifiers': []}
-                self.consume('ASSIGN'); val = self.parse_expr(); self.consume('SEMI')
-                return {'type': 'VarDecl', 'var_type': var_type, 'name': var_name, 'value': val, 'args': args, 'modifiers': []}
+                            while self.current().type == 'COMMA': 
+                                self.consume('COMMA')
+                                if self.current().type == 'RPAREN': break
+                                args.append(self.parse_expr())
+                        self.consume('RPAREN')
+                        
+                    val = None
+                    if self.current().type == 'ASSIGN':
+                        self.consume('ASSIGN')
+                        val = self.parse_expr()
+                        
+                    declarations.append({'name': var_name, 'args': args, 'value': val})
+                    
+                    if self.current() and self.current().type == 'COMMA':
+                        self.consume('COMMA')
+                    else:
+                        break
+                        
+                self.consume('SEMI')
+                return {'type': 'VarDecl', 'var_type': var_type, 'modifiers': [], 'declarations': declarations}
                 
             expr = self.parse_primary()
             if self.current() and self.current().type in ['OP_INC', 'OP_DEC']:
@@ -94,11 +107,9 @@ class Parser:
 
     def parse_param(self):
         p_type = 'any'
-        # Check for root type (e.g., int, str)
         if self.current() and self.current().type == 'KEYWORD' and self.current().value in ['auto', 'int', 'str', 'float', 'bool', 'void', 'any']:
             p_type = self.consume('KEYWORD').value
             
-        # Check if it is marked as an array!
         if self.current() and self.current().type == 'KEYWORD' and self.current().value == 'array':
             self.consume('KEYWORD')
             if self.current() and self.current().type == 'DOUBLE_COLON':
@@ -164,7 +175,6 @@ class Parser:
                             if self.current().type == 'RPAREN': break
                             params.append(self.parse_param())
                     self.consume('RPAREN'); body = self.parse_block()
-                    # Upgraded to allow Strict Typed Array Return Values!
                     return {'type': 'FuncDecl', 'return_type': f"{var_type}_array", 'name': name, 'params': params, 'body': body, 'modifiers': modifiers}
                 else:
                     self.consume('KEYWORD'); self.consume('DOUBLE_COLON')
@@ -186,20 +196,34 @@ class Parser:
                         expr = self.parse_expr(); self.consume('SEMI')
                         return {'type': 'ArrayDecl', 'var_type': var_type, 'name': name, 'value': expr, 'modifiers': modifiers}
         
-        name = self.consume('ID').value; args = []
-        if self.current().type == 'LPAREN':
-            self.consume('LPAREN')
-            if self.current().type != 'RPAREN':
-                args.append(self.parse_expr())
-                while self.current().type == 'COMMA': 
-                    self.consume('COMMA')
-                    if self.current().type == 'RPAREN': break
+        # Support multiple standard declarations: int x = 1, y = 2;
+        declarations = []
+        while True:
+            name = self.consume('ID').value; args = []
+            if self.current().type == 'LPAREN':
+                self.consume('LPAREN')
+                if self.current().type != 'RPAREN':
                     args.append(self.parse_expr())
-            self.consume('RPAREN')
-        if self.current().type == 'SEMI':
-            self.consume('SEMI'); return {'type': 'VarDecl', 'var_type': var_type, 'name': name, 'value': None, 'args': args, 'modifiers': modifiers}
-        self.consume('ASSIGN'); expr = self.parse_expr(); self.consume('SEMI')
-        return {'type': 'VarDecl', 'var_type': var_type, 'name': name, 'value': expr, 'args': args, 'modifiers': modifiers}
+                    while self.current().type == 'COMMA': 
+                        self.consume('COMMA')
+                        if self.current().type == 'RPAREN': break
+                        args.append(self.parse_expr())
+                self.consume('RPAREN')
+                
+            val = None
+            if self.current().type == 'ASSIGN':
+                self.consume('ASSIGN')
+                val = self.parse_expr()
+                
+            declarations.append({'name': name, 'args': args, 'value': val})
+            
+            if self.current() and self.current().type == 'COMMA':
+                self.consume('COMMA')
+            else:
+                break
+                
+        self.consume('SEMI')
+        return {'type': 'VarDecl', 'var_type': var_type, 'modifiers': modifiers, 'declarations': declarations}
 
     def parse_block(self):
         self.consume('LBLOCK'); stmts = []
@@ -209,14 +233,11 @@ class Parser:
     def parse_try_catch(self):
         self.consume('KEYWORD') 
         try_body = self.parse_block()
-        
         self.consume('KEYWORD') 
         catch_var = None
         if self.current() and self.current().type == 'COLON':
             self.consume('COLON')
-            if self.current() and self.current().type == 'ID':
-                catch_var = self.consume('ID').value
-                
+            if self.current() and self.current().type == 'ID': catch_var = self.consume('ID').value
         catch_body = self.parse_block()
         return {'type': 'TryCatch', 'try_body': try_body, 'catch_body': catch_body, 'catch_var': catch_var}
 
