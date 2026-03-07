@@ -1,0 +1,81 @@
+// ==========================================
+// Brainfuck Interpreter in pure Hydra
+// ==========================================
+
+void function::run_brainfuck(str code)[[
+    write("--- Booting Hydra Brainfuck VM ---");
+    
+    // 1. Initialize the Memory Tape
+    // We pre-fill it with 0s so math operations don't hit 'null'
+    int array::tape = {};
+    for:(int i = 0; i < 256; i++)[[
+        tape[i] = 0;
+    ]]
+    
+    // 2. Set up Pointers
+    int ptr = 0;           // Data pointer
+    int pc = 0;            // Program Counter (Instruction pointer)
+    int code_len = #code;  // Using Hydra's Lua-style length operator!
+    
+    // 3. The Execution Loop
+    while:(pc < code_len)[[
+        str char = code[pc];
+        
+        if:(char == ">")[[
+            ptr++;
+        ]]
+        elseif:(char == "<")[[
+            ptr--;
+        ]]
+        elseif:(char == "+")[[
+            tape[ptr]++;
+        ]]
+        elseif:(char == "-")[[
+            tape[ptr]--;
+        ]]
+        elseif:(char == ".")[[
+            // Outputs the raw ASCII integer value
+            write("Output:", tape[ptr]); 
+        ]]
+        elseif:(char == "[")[[
+            // Jump forward if the current cell is 0
+            if:(tape[ptr] == 0)[[
+                int loop_depth = 1;
+                while:(loop_depth > 0)[[
+                    pc++;
+                    str next_char = code[pc];
+                    if:(next_char == "[")[[ loop_depth++; ]]
+                    elseif:(next_char == "]")[[ loop_depth--; ]]
+                ]]
+            ]]
+        ]]
+        elseif:(char == "]")[[
+            // Jump backward if the current cell is NOT 0
+            if:(tape[ptr] != 0)[[
+                int loop_depth = 1;
+                while:(loop_depth > 0)[[
+                    pc--;
+                    str prev_char = code[pc];
+                    if:(prev_char == "]")[[ loop_depth++; ]]
+                    elseif:(prev_char == "[")[[ loop_depth--; ]]
+                ]]
+            ]]
+        ]]
+        
+        // Move to the next instruction
+        pc++;
+    ]]
+    
+    write("--- Execution Complete ---");
+]]
+
+// ==========================================
+// Test Program
+// ==========================================
+// This Brainfuck code adds 2 and 3 together, 
+// leaving the result (5) in cell 1, and prints it.
+
+str bf_code = "++>+++[<+>-]<.";
+write("Running Code:", bf_code);
+
+run_brainfuck(bf_code);

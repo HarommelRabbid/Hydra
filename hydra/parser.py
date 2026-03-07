@@ -1,3 +1,4 @@
+# parser_engine.py
 from errors import HydraError
 from lexer import lex
 
@@ -39,7 +40,7 @@ class Parser:
         token = self.current()
         if token.type == 'KEYWORD':
             val = token.value
-            if val in ['const', 'local', 'global', 'auto', 'int', 'str', 'float', 'bool', 'void']: return self.parse_decl()
+            if val in ['const', 'local', 'global', 'auto', 'int', 'str', 'float', 'bool', 'void', 'any']: return self.parse_decl()
             elif val == 'if': return self.parse_if()
             elif val == 'while': return self.parse_while()
             elif val == 'for': return self.parse_for()
@@ -92,12 +93,23 @@ class Parser:
         self.error(f"Unexpected statement starting with {token.value}", token)
 
     def parse_param(self):
-        p_type = self.consume('KEYWORD').value if self.current().type == 'KEYWORD' and self.current().value in ['auto', 'int', 'str', 'float', 'bool', 'void'] else 'any'
+        p_type = 'any'
+        # Check for root type (e.g., int, str)
+        if self.current() and self.current().type == 'KEYWORD' and self.current().value in ['auto', 'int', 'str', 'float', 'bool', 'void', 'any']:
+            p_type = self.consume('KEYWORD').value
+            
+        # Check if it is marked as an array!
+        if self.current() and self.current().type == 'KEYWORD' and self.current().value == 'array':
+            self.consume('KEYWORD')
+            if self.current() and self.current().type == 'DOUBLE_COLON':
+                self.consume('DOUBLE_COLON')
+            p_type = f"{p_type}_array"
+            
         p_name = self.consume('ID').value
         default_expr = None
         if self.current() and self.current().type == 'ASSIGN': 
             self.consume('ASSIGN')
-            default_expr = self.parse_expr() # Bug 2 Fix: Store Default Args
+            default_expr = self.parse_expr() 
         return {'type': p_type, 'name': p_name, 'default': default_expr}
 
     def parse_decl(self):
@@ -152,7 +164,8 @@ class Parser:
                             if self.current().type == 'RPAREN': break
                             params.append(self.parse_param())
                     self.consume('RPAREN'); body = self.parse_block()
-                    return {'type': 'FuncDecl', 'return_type': 'array', 'name': name, 'params': params, 'body': body, 'modifiers': modifiers}
+                    # Upgraded to allow Strict Typed Array Return Values!
+                    return {'type': 'FuncDecl', 'return_type': f"{var_type}_array", 'name': name, 'params': params, 'body': body, 'modifiers': modifiers}
                 else:
                     self.consume('KEYWORD'); self.consume('DOUBLE_COLON')
                     name = self.consume('ID').value
@@ -165,7 +178,7 @@ class Parser:
                             elements.append(self.parse_expr())
                             while self.current().type == 'COMMA': 
                                 self.consume('COMMA')
-                                if self.current().type == 'RBRACE': break # Fix: Trailing comma in arrays
+                                if self.current().type == 'RBRACE': break 
                                 elements.append(self.parse_expr())
                         self.consume('RBRACE'); self.consume('SEMI')
                         return {'type': 'ArrayDecl', 'var_type': var_type, 'name': name, 'elements': elements, 'modifiers': modifiers}
@@ -218,7 +231,7 @@ class Parser:
         else_body = None
         if self.current() and self.current().type == 'KEYWORD' and self.current().value == 'else':
             self.consume('KEYWORD')
-            if self.current() and self.current().type == 'COLON': self.consume('COLON') # Bug 5 Fix: Else syntax inconsistency
+            if self.current() and self.current().type == 'COLON': self.consume('COLON')
             else_body = self.parse_block()
         return {'type': 'If', 'condition': cond, 'body': body, 'elseifs': elseifs, 'else_body': else_body}
 
@@ -350,7 +363,6 @@ class Parser:
                     self.consume('LPAREN'); cast_type = self.consume('KEYWORD').value; self.consume('RPAREN')
                     return {'type': 'Cast', 'cast_type': cast_type, 'expr': self.parse_unary()}
                     
-        # Bug 1 Fix: Allow Unary PLUS and MINUS
         if self.current() and self.current().type in ['OP_NOT', 'OP_LEN', 'OP_NOT_LOGIC', 'OP_MINUS', 'OP_PLUS']:
             op = self.consume().value
             return {'type': 'UnaryOp', 'op': op, 'expr': self.parse_unary()}
@@ -361,7 +373,6 @@ class Parser:
         if tok.type == 'INT_LITERAL': expr = {'type': 'Literal', 'value': int(tok.value), '_length': tok.length}
         elif tok.type == 'FLOAT_LITERAL': expr = {'type': 'Literal', 'value': float(tok.value), '_length': tok.length}
         
-        # Bug 4 Fix: Escape sequence properly resolved!
         elif tok.type == 'STR_LITERAL': 
             parsed_str = bytes(tok.value[1:-1], "utf-8").decode("unicode_escape")
             expr = {'type': 'Literal', 'value': parsed_str, '_length': tok.length} 
@@ -379,13 +390,9 @@ class Parser:
             while i < len(raw_str):
                 if raw_str[i] == '\\' and i + 1 < len(raw_str):
                     if raw_str[i+1] in ['{', '}']:
-                        curr_text += raw_str[i+1]
-                        i += 2
-                        continue
+                        curr_text += raw_str[i+1]; i += 2; continue
                     else:
-                        curr_text += raw_str[i:i+2]
-                        i += 2
-                        continue
+                        curr_text += raw_str[i:i+2]; i += 2; continue
                         
                 if raw_str[i] == '{':
                     if curr_text:
@@ -395,7 +402,7 @@ class Parser:
                     i += 1
                     brace_count = 1
                     expr_str = ""
-                    in_str = False # Bug 11 Fix: F-String Inception Trap
+                    in_str = False 
                     while i < len(raw_str) and brace_count > 0:
                         if raw_str[i] == '"' and raw_str[i-1] != '\\': in_str = not in_str
                         if not in_str:
@@ -410,15 +417,12 @@ class Parser:
                         if temp_tokens:
                             temp_parser = Parser(temp_tokens, temp_lines)
                             expr_ast = temp_parser.parse_expr()
-                            # Bug 3 Fix: Catch garbage trailing logic in f-strings!
                             if temp_parser.current() is not None:
                                 self.error(f"Syntax error inside f-string at: {temp_parser.current().value}", tok)
                             parts.append(expr_ast)
-                    i += 1
-                    continue
+                    i += 1; continue
                     
-                curr_text += raw_str[i]
-                i += 1
+                curr_text += raw_str[i]; i += 1
                 
             if curr_text: 
                 parsed_txt = bytes(curr_text, "utf-8").decode("unicode_escape")
@@ -431,7 +435,7 @@ class Parser:
                 elements.append(self.parse_expr())
                 while self.current().type == 'COMMA': 
                     self.consume('COMMA')
-                    if self.current().type == 'RBRACE': break # Bug 6 Fix
+                    if self.current().type == 'RBRACE': break 
                     elements.append(self.parse_expr())
             self.consume('RBRACE')
             expr = {'type': 'ArrayLiteral', 'elements': elements}
@@ -452,15 +456,14 @@ class Parser:
                     args.append(self.parse_expr())
                     while self.current().type == 'COMMA': 
                         self.consume('COMMA')
-                        if self.current().type == 'RPAREN': break # Bug 6 Fix
+                        if self.current().type == 'RPAREN': break 
                         args.append(self.parse_expr())
                 self.consume('RPAREN'); expr = {'type': 'CallExpr', 'target': expr, 'args': args}
             elif self.current().type == 'LBRACKET':
                 self.consume('LBRACKET'); idx = self.parse_expr(); self.consume('RBRACKET')
                 expr = {'type': 'ArrayAccess', 'target': expr, 'index': idx}
             elif self.current().type == 'DOT':
-                self.consume('DOT')
-                prop = self.consume() # Bug 13 Fix: Keyword Property allowed in DOT!
+                self.consume('DOT'); prop = self.consume() 
                 if prop.type not in ['ID', 'KEYWORD']: self.error("Expected property name")
                 expr = {'type': 'DotAccess', 'target': expr, 'prop': prop.value}
             else: break

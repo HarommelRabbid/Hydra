@@ -3,13 +3,24 @@ import math
 from errors import HydraError
 
 class ReturnException(Exception):
-    def __init__(self, value): self.value = value
-class BreakException(Exception): pass
-class ContinueException(Exception): pass
+    def __init__(self, value, node=None): 
+        self.value = value
+        self.node = node
+
+class BreakException(Exception): 
+    def __init__(self, node=None): self.node = node
+
+class ContinueException(Exception): 
+    def __init__(self, node=None): self.node = node
 
 class Environment:
     def __init__(self, parent=None):
         self.vars, self.meta, self.parent = {}, {}, parent
+        
+    def get_meta(self, name):
+        if name in self.meta: return self.meta[name]
+        if self.parent: return self.parent.get_meta(name)
+        return None
         
     def check_type(self, val, expected_type):
         if val is None: return True 
@@ -18,6 +29,16 @@ class Environment:
         if expected_type == 'str': return isinstance(val, str)
         if expected_type == 'bool': return isinstance(val, bool)
         if expected_type == 'array': return isinstance(val, list)
+        
+        # Deep recursion validation for internal arrays!
+        if expected_type.endswith('_array'):
+            if not isinstance(val, list): return False
+            inner_type = expected_type.replace('_array', '')
+            if inner_type in ['any', 'auto']: return True
+            for item in val:
+                if not self.check_type(item, inner_type): return False
+            return True
+            
         return True 
         
     def set(self, name, value, var_type='any', modifiers=None):
@@ -72,7 +93,6 @@ class Evaluator:
         self.register_native_func("typeof", native_typeof)
         
     def to_hydra_str(self, val):
-        """Standardizes host string conversion to Hydra syntax."""
         if val is None: return "null"
         if isinstance(val, bool): return "true" if val else "false"
         return str(val)
@@ -92,33 +112,37 @@ class Evaluator:
             if t == 'Program':
                 try:
                     for stmt in node['body']: self.evaluate(stmt)
-                except ReturnException: raise HydraError("Cannot 'return' outside a function.")
-                except BreakException: raise HydraError("Cannot 'break' outside a loop.")
-                except ContinueException: raise HydraError("Cannot 'continue' outside a loop.")
+                except ReturnException as r: 
+                    if r.node: node = r.node; self.current_line = node.get('_line', self.current_line); self.current_col = node.get('_col', self.current_col)
+                    raise SyntaxError("Cannot 'return' outside a function.")
+                except BreakException as b: 
+                    if b.node: node = b.node; self.current_line = node.get('_line', self.current_line); self.current_col = node.get('_col', self.current_col)
+                    raise SyntaxError("Cannot 'break' outside a loop.")
+                except ContinueException as c: 
+                    if c.node: node = c.node; self.current_line = node.get('_line', self.current_line); self.current_col = node.get('_col', self.current_col)
+                    raise SyntaxError("Cannot 'continue' outside a loop.")
                     
             elif t == 'VarDecl':
                 val = None
-                
                 if node['name'] in self.env.vars:
                     raise NameError(f"Variable '{node['name']}' is already defined in this scope.")
                     
                 try:
                     type_obj = self.env.get(node['var_type']) if 'var_type' in node else None
-                    if isinstance(type_obj, dict):
-                        if type_obj.get('type') == 'Class':
-                            args = [self.evaluate(a) for a in node.get('args', [])]
-                            val = Environment(parent=self.env); old_env = self.env; self.env = val 
-                            for stmt in type_obj['body']: self.evaluate(stmt)
-                            constructor = val.vars.get(node['var_type']) or val.vars.get('init')
-                            if constructor and isinstance(constructor, dict) and constructor.get('type') == 'Function':
-                                call_env = Environment(parent=constructor['closure'])
-                                for i, param in enumerate(constructor['params']):
-                                    if i < len(args): call_env.set(param['name'], args[i])
-                                self.env = call_env
-                                try:
-                                    for stmt in constructor['body']: self.evaluate(stmt)
-                                except ReturnException: pass
-                            self.env = old_env
+                    if isinstance(type_obj, dict) and type_obj.get('type') == 'Class':
+                        args = [self.evaluate(a) for a in node.get('args', [])]
+                        val = Environment(parent=self.env); old_env = self.env; self.env = val 
+                        for stmt in type_obj['body']: self.evaluate(stmt)
+                        constructor = val.vars.get(node['var_type']) or val.vars.get('init')
+                        if constructor and isinstance(constructor, dict) and constructor.get('type') == 'Function':
+                            call_env = Environment(parent=constructor['closure'])
+                            for i, param in enumerate(constructor['params']):
+                                if i < len(args): call_env.set(param['name'], args[i])
+                            self.env = call_env
+                            try:
+                                for stmt in constructor['body']: self.evaluate(stmt)
+                            except ReturnException: pass
+                        self.env = old_env
                 except NameError: pass
                 
                 if node.get('value') is not None: 
@@ -154,10 +178,24 @@ class Evaluator:
                 target_env = self.env
                 if 'global' in node.get('modifiers', []):
                     while target_env.parent: target_env = target_env.parent
-                if not target_env.check_type(val, 'array'):
+                    
+                actual_type = node.get('var_type', 'any')
+                
+                # Enforce inner element types upon initialization!
+                if actual_type not in ['auto', 'any']:
+                    if val is not None:
+                        for i, item in enumerate(val):
+                            if not target_env.check_type(item, actual_type):
+                                item_type = "null" if item is None else type(item).__name__.replace('str', 'string')
+                                raise TypeError(f"Type Mismatch: Cannot assign '{item_type}' to '{actual_type} array' at index {i}.")
+                                
+                saved_type = f"{actual_type}_array" if actual_type not in ['auto', 'any'] else 'array'
+                
+                if not target_env.check_type(val, saved_type):
                     val_type = "null" if val is None else type(val).__name__.replace('str', 'string').replace('list', 'array')
-                    raise TypeError(f"Type Mismatch: Cannot assign '{val_type}' to 'array' variable '{node['name']}'")
-                target_env.set(node['name'], val, 'array', node.get('modifiers', []))
+                    raise TypeError(f"Type Mismatch: Cannot assign '{val_type}' to '{actual_type} array' variable '{node['name']}'")
+                    
+                target_env.set(node['name'], val, saved_type, node.get('modifiers', []))
 
             elif t == 'UpdateObj':
                 target = node['target']; delta = 1 if node['operator'] == '++' else -1
@@ -176,12 +214,10 @@ class Evaluator:
                 
             elif t == 'AssignObj':
                 target = node['target']; val = self.evaluate(node['value']); op = node['operator']
-                
                 def apply_op(current, v, o):
                     if o == '=': return v
                     if o == '+=': 
-                        if isinstance(current, str) or isinstance(v, str):
-                            return self.to_hydra_str(current) + self.to_hydra_str(v)
+                        if isinstance(current, str) or isinstance(v, str): return self.to_hydra_str(current) + self.to_hydra_str(v)
                         return current + v
                     if o == '-=': return current - v
                     if o == '*=': return current * v
@@ -201,54 +237,91 @@ class Evaluator:
                     arr = self.evaluate(target['target']); idx = self.evaluate(target['index'])
                     if isinstance(arr, str): raise TypeError("Strings are immutable in Hydra.")
                     if isinstance(arr, list) and idx >= len(arr): arr.extend([None] * (idx - len(arr) + 1))
-                    if op == '=': arr[idx] = val
-                    else: arr[idx] = apply_op(arr[idx], val, op)
+                    
+                    val_to_assign = val if op == '=' else apply_op(arr[idx], val, op)
+                    
+                    # Ensure array mutations do not break strict types!
+                    if target['target']['type'] == 'Identifier':
+                        meta = self.env.get_meta(target['target']['name'])
+                        if meta and meta['type'].endswith('_array'):
+                            inner_type = meta['type'].replace('_array', '')
+                            if inner_type not in ['any', 'auto']:
+                                if not self.env.check_type(val_to_assign, inner_type):
+                                    v_type = "null" if val_to_assign is None else type(val_to_assign).__name__.replace('str', 'string')
+                                    raise TypeError(f"Type Mismatch: Cannot assign '{v_type}' into '{inner_type} array'.")
+                                    
+                    arr[idx] = val_to_assign
                     
             elif t == 'ExprStmt': self.evaluate(node['expr'])
             
-            # Bug Fix: Properly save the intended return_type into the closure dictionary!
             elif t == 'FuncDecl': self.env.set(node['name'], {'type': 'Function', 'return_type': node.get('return_type', 'any'), 'params': node['params'], 'body': node['body'], 'closure': self.env}, 'function', node.get('modifiers', []))
             
             elif t == 'MethodDef':
                 class_def = self.env.get(node['class_name'])
-                func_node = {'type': 'FuncDecl', 'return_type': node['return_type'], 'name': node['name'], 'params': node['params'], 'body': node['body'], 'modifiers': node['modifiers']}
-                class_def['body'].append(func_node)
+                class_def['body'].append({'type': 'FuncDecl', 'return_type': node['return_type'], 'name': node['name'], 'params': node['params'], 'body': node['body'], 'modifiers': node['modifiers']})
                 
             elif t == 'ClassDecl': self.env.set(node['name'], {'type': 'Class', 'body': node['body']})
                 
             elif t == 'CallExpr':
-                func = self.evaluate(node['target'])
+                if node['target']['type'] == 'Identifier':
+                    func_name = node['target']['name']
+                    try:
+                        func = self.env.get(func_name)
+                    except NameError:
+                        if '_line' in node['target']: self.current_line, self.current_col = node['target']['_line'], node['target']['_col']
+                        elif '_line' in node: self.current_line, self.current_col = node['_line'], node['_col']
+                        line_text = self.lines[self.current_line - 1] if self.lines and self.current_line <= len(self.lines) else ""
+                        idx = line_text.find(func_name, max(0, self.current_col - 1))
+                        if idx == -1: idx = line_text.find(func_name)
+                        if idx != -1: self.current_col = idx + 1
+                        node = {'_length': len(func_name)}
+                        raise NameError(f"Function '{func_name}' not defined.")
+                else:
+                    func = self.evaluate(node['target'])
+                
                 args = [self.evaluate(arg) for arg in node['args']]
-                
                 if callable(func): return func(*args)
-                
-                if len(args) > len(func['params']):
-                    raise TypeError(f"Too many arguments passed! Expected {len(func['params'])}, got {len(args)}.")
+                if not isinstance(func, dict) or 'params' not in func: raise TypeError(f"Target is not callable.")
+                if len(args) > len(func['params']): raise TypeError(f"Too many arguments passed! Expected {len(func['params'])}, got {len(args)}.")
                     
                 call_env = Environment(parent=func['closure'])
                 for i, param in enumerate(func['params']):
                     if i < len(args): call_env.set(param['name'], args[i])
-                    elif param.get('default') is not None:
-                        call_env.set(param['name'], self.evaluate(param['default']))
-                    else:
-                        raise TypeError(f"Missing required argument '{param['name']}'.")
+                    elif param.get('default') is not None: call_env.set(param['name'], self.evaluate(param['default']))
+                    else: raise TypeError(f"Missing required argument '{param['name']}'.")
                 
                 old_env, result = self.env, None; self.env = call_env
+                return_node = None
                 try:
                     for stmt in func['body']: self.evaluate(stmt)
-                except ReturnException as r: result = r.value
+                except ReturnException as r: 
+                    result = r.value; return_node = r.node
                 finally: self.env = old_env
                 
-                # Bug Fix: Strict return type enforcement barrier
                 ret_type = func.get('return_type', 'any')
                 if ret_type != 'any' and ret_type != 'auto':
                     if ret_type == 'void' and result is not None:
                         v_type = type(result).__name__.replace('str', 'string')
+                        if return_node:
+                            val_node = return_node.get('value', return_node) or return_node
+                            self.current_line = val_node.get('_line', self.current_line); self.current_col = val_node.get('_col', self.current_col)
+                            node = val_node
                         raise TypeError(f"Type Mismatch: 'void' function cannot return a value of type '{v_type}'.")
                     elif ret_type != 'void' and not old_env.check_type(result, ret_type):
                         v_type = "null" if result is None else type(result).__name__.replace('str', 'string')
+                        if return_node:
+                            val_node = return_node.get('value', return_node) or return_node
+                            self.current_line = val_node.get('_line', self.current_line); self.current_col = val_node.get('_col', self.current_col)
+                            line_text = self.lines[self.current_line - 1] if self.lines and self.current_line <= len(self.lines) else ""
+                            if val_node.get('type') == 'Literal' and isinstance(val_node.get('value'), str):
+                                s_val = f'"{val_node["value"]}"'
+                                idx = line_text.find(s_val)
+                                if idx != -1: self.current_col = idx + 1; node = {'_length': len(s_val)}
+                            elif val_node.get('type') == 'Identifier':
+                                idx = line_text.find(val_node['name'])
+                                if idx != -1: self.current_col = idx + 1; node = {'_length': len(val_node['name'])}
+                            else: node = val_node
                         raise TypeError(f"Type Mismatch: Function expected to return '{ret_type}', but returned '{v_type}'.")
-                        
                 return result
                 
             elif t == 'DotAccess':
@@ -259,8 +332,7 @@ class Evaluator:
             elif t == 'ArrayAccess':
                 arr = self.evaluate(node['target'])
                 idx = self.evaluate(node['index'])
-                if isinstance(arr, (list, str)):
-                    return arr[idx] if 0 <= idx < len(arr) else None
+                if isinstance(arr, (list, str)): return arr[idx] if 0 <= idx < len(arr) else None
                 raise TypeError("Cannot index non-array or non-string.")
                 
             elif t == 'ArrayLiteral': return [self.evaluate(e) for e in node['elements']]
@@ -275,12 +347,13 @@ class Evaluator:
                     error_msg = str(e) if not isinstance(e, HydraError) else e.msg
                     self.env = old_env 
                     catch_env = Environment(parent=self.env)
-                    if node['catch_var']:
-                        catch_env.set(node['catch_var'], error_msg, 'str')
+                    if node['catch_var']: catch_env.set(node['catch_var'], error_msg, 'str')
                     self.env = catch_env
-                    for stmt in node['catch_body']: self.evaluate(stmt)
+                    try:
+                        for stmt in node['catch_body']: self.evaluate(stmt)
+                    finally: self.env = old_env
                 finally:
-                    self.env = old_env
+                    if self.env is try_env: self.env = old_env
                     
             elif t == 'Cast':
                 val = self.evaluate(node['expr'])
@@ -290,40 +363,51 @@ class Evaluator:
                     if node['cast_type'] == 'float': return float(val)
                     if node['cast_type'] == 'str': return str(val)
                     if node['cast_type'] == 'bool': return bool(val)
-                except ValueError:
-                    raise TypeError(f"Cannot explicitly cast '{val}' to {node['cast_type']}")
+                except ValueError: raise TypeError(f"Cannot explicitly cast '{val}' to {node['cast_type']}")
 
             elif t == 'If':
                 if self.evaluate(node['condition']):
-                    for stmt in node['body']: self.evaluate(stmt)
+                    old_env = self.env; self.env = Environment(parent=old_env)
+                    try:
+                        for stmt in node['body']: self.evaluate(stmt)
+                    finally: self.env = old_env
                 else:
                     handled = False
                     for elif_node in node['elseifs']:
                         if self.evaluate(elif_node['condition']):
-                            for stmt in elif_node['body']: self.evaluate(stmt)
+                            old_env = self.env; self.env = Environment(parent=old_env)
+                            try:
+                                for stmt in elif_node['body']: self.evaluate(stmt)
+                            finally: self.env = old_env
                             handled = True; break
                     if not handled and node['else_body']:
-                        for stmt in node['else_body']: self.evaluate(stmt)
+                        old_env = self.env; self.env = Environment(parent=old_env)
+                        try:
+                            for stmt in node['else_body']: self.evaluate(stmt)
+                        finally: self.env = old_env
 
             elif t == 'While':
                 while self.evaluate(node['condition']):
+                    old_env = self.env; self.env = Environment(parent=old_env) 
                     try:
                         for stmt in node['body']: self.evaluate(stmt)
-                    except BreakException: break
-                    except ContinueException: continue
+                    except BreakException: self.env = old_env; break
+                    except ContinueException: self.env = old_env; continue
+                    finally: self.env = old_env
                     
             elif t == 'For':
-                old_env = self.env; self.env = Environment(parent=old_env) 
+                loop_env = Environment(parent=self.env); old_env = self.env; self.env = loop_env 
                 try:
                     if node['decl']: self.evaluate(node['decl'])
                     while self.evaluate(node['cond']):
+                        iter_env = Environment(parent=self.env); self.env = iter_env
                         try:
                             for stmt in node['body']: self.evaluate(stmt)
-                        except BreakException: break
-                        except ContinueException: pass
+                        except BreakException: self.env = loop_env; break
+                        except ContinueException: pass 
+                        finally: self.env = loop_env
                         self.evaluate(node['step'])
-                finally:
-                    self.env = old_env
+                finally: self.env = old_env
                 
             elif t == 'Foreach':
                 arr = self.env.get(node['array']); old_env = self.env
@@ -331,26 +415,32 @@ class Evaluator:
                     self.env = Environment(parent=old_env); self.env.set(node['item'], item)
                     try:
                         for stmt in node['body']: self.evaluate(stmt)
-                    except BreakException: break
-                    except ContinueException: continue
-                self.env = old_env
+                    except BreakException: self.env = old_env; break
+                    except ContinueException: self.env = old_env; continue
+                    finally: self.env = old_env
                 
             elif t == 'Switch':
                 switch_val = self.evaluate(node['variable']); matched = False
                 for case in node['cases']:
                     if switch_val == self.evaluate(case['value']):
                         matched = True
-                        for stmt in case['body']: self.evaluate(stmt)
+                        old_env = self.env; self.env = Environment(parent=old_env)
+                        try:
+                            for stmt in case['body']: self.evaluate(stmt)
+                        finally: self.env = old_env
                         break 
                 if not matched and node['default'] is not None:
-                    for stmt in node['default']: self.evaluate(stmt)
+                    old_env = self.env; self.env = Environment(parent=old_env)
+                    try:
+                        for stmt in node['default']: self.evaluate(stmt)
+                    finally: self.env = old_env
 
             elif t == 'Return': 
                 return_val = self.evaluate(node['value']) if node.get('value') is not None else None
-                raise ReturnException(return_val)
+                raise ReturnException(return_val, node)
                 
-            elif t == 'Break': raise BreakException()
-            elif t == 'Continue': raise ContinueException()
+            elif t == 'Break': raise BreakException(node)
+            elif t == 'Continue': raise ContinueException(node)
 
             elif t == 'UnaryOp':
                 expr = self.evaluate(node['expr'])
@@ -366,25 +456,19 @@ class Evaluator:
 
             elif t == 'FString':
                 res = ""
-                for p in node['parts']:
-                    res += self.to_hydra_str(self.evaluate(p))
+                for p in node['parts']: res += self.to_hydra_str(self.evaluate(p))
                 return res
 
             elif t == 'BinOp':
-                op = node['op']
-                l = self.evaluate(node['left'])
-                
+                op = node['op']; l = self.evaluate(node['left'])
                 if op == '&&': return bool(l and self.evaluate(node['right']))
                 if op == '||': return bool(l or self.evaluate(node['right']))
                 
                 r = self.evaluate(node['right'])
-                
                 try:
                     if op == '+': 
-                        if isinstance(l, str) or isinstance(r, str):
-                            return self.to_hydra_str(l) + self.to_hydra_str(r)
+                        if isinstance(l, str) or isinstance(r, str): return self.to_hydra_str(l) + self.to_hydra_str(r)
                         return l + r
-                        
                     if op == '-': return l - r
                     if op in ['*', '×']: return l * r
                     if op in ['/', '÷']: return l / r
@@ -394,14 +478,12 @@ class Evaluator:
                     if op in ['!=', '≠']: return l != r
                     if op == '<': return l < r
                     if op == '>': return l > r
-                except ZeroDivisionError:
-                    raise HydraError("Division by zero") 
+                except ZeroDivisionError: raise HydraError("Division by zero") 
                     
             elif t == 'Literal': return node['value']
             elif t == 'Identifier': return self.env.get(node['name'])
             
-        except (ReturnException, BreakException, ContinueException, HydraError):
-            raise
+        except (ReturnException, BreakException, ContinueException, HydraError): raise
         except Exception as e:
             line_text = self.lines[self.current_line - 1] if self.lines else ""
             length = node.get('_length', 1) 
